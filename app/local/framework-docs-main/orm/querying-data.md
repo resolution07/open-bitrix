@@ -1,0 +1,1094 @@
+---
+title: Выборка данных
+description: 'Выборка данных. ORM Bitrix Framework: ключевые концепции, примеры и рекомендации.'
+---
+
+Для выборки данных с фильтрацией, группировкой и сортировкой в Bitrix Framework используются метод `getList` и [построитель запросов](./query-builder.md) на объекте `Bitrix\Main\ORM\Query\Query`.
+
+## Метод getList
+
+Метод `getList` универсален для всех сущностей и работает по общим правилам. Его невозможно изменить, но он дает гибкость для выполнения запросов.
+
+Примеры статьи используют сущности модуля `somepartner.mybookscatalog`. Полное описание класса `BookTable` смотрите в статье [Концепция ORM](./orm-concepts.md#book-model). Перед обращением к классу подключите модуль вызовом `Loader::includeModule('somepartner.mybookscatalog')` — подробнее в разделе [Подключить модуль сущности](./orm-concepts.md#include-module).
+
+Рассмотрим применение метода на примере сущности `BookTable`. Метод принимает параметры:
+
+```php
+use Bitrix\Main\ORM;
+
+$result = BookTable::getList([
+    'select' => ['ISBN', 'TITLE', 'PUBLISH_DATE', 'CNT'], // поля, которые нужно получить
+    'filter' => ['=ID' => 1], // условия фильтрации
+    'group' => ['PUBLISH_DATE'], // поля для группировки
+    'order' => ['PUBLISH_DATE' => 'DESC'], // параметры сортировки
+    'limit' => 10, // количество записей
+    'offset' => 0, // смещение для limit
+    'runtime' => [ // динамически определенные поля
+        new ORM\Fields\ExpressionField('CNT', 'COUNT(*)')
+    ],
+    'count_total' => true // подсчитать общее количество записей для getCount()
+
+]);
+```
+
+-  `select` — выбирает поля для выборки
+
+-  `filter` — задает условия фильтрации, аналогично `WHERE` в SQL
+
+-  `group` — группирует данные по указанным полям
+
+-  `order` — сортирует данные по указанным полям
+
+-  `limit` и `offset` — ограничивают количество записей и задают смещение
+
+-  `runtime` — добавляет временные поля, которые вычисляются во время выполнения запроса
+
+-  `count_total` — включает подсчет общего количества записей для метода `getCount()` без учета `limit` и `offset`
+
+#### Получение данных из результата
+
+Метод `getList` возвращает объект `DB\Result`. Данные можно получить с помощью методов `fetch()` или `fetchAll()`.
+
+```php
+// Получение данных построчно
+$rows = [];
+$result = BookTable::getList($parameters);
+while ($row = $result->fetch())
+{
+    $rows[] = $row;
+}
+
+// Получение всех данных сразу
+$rows = BookTable::getList($parameters)->fetchAll();
+```
+
+#### Форматирование данных
+
+Формат данных меняют на уровне поля, а не всей сущности. Метод `addFetchDataModifier()` объекта поля добавляет модификатор чтения. Модификатор получает значение поля после преобразования типов и возвращает новое значение.
+
+**Пример.** Поле `PUBLISH_DATE` отдается строкой в формате дня, месяца и года:
+
+```php
+namespace SomePartner\MyBooksCatalog;
+
+use Bitrix\Main\ORM\Data\DataManager;
+use Bitrix\Main\ORM\Fields\DateField;
+
+class BookTable extends DataManager
+{
+    public static function getMap(): array
+    {
+        return [
+            // остальные поля — как в статье «Концепция ORM»
+            (new DateField('PUBLISH_DATE'))
+                ->addFetchDataModifier(static function ($value)
+                {
+                    return $value === null ? null : $value->format('d.m.Y');
+                }),
+        ];
+    }
+}
+
+// Использование
+$result = BookTable::getList($parameters);
+$rows = $result->fetchAll();
+```
+
+В старом коде тот же модификатор задают параметром `fetch_data_modification` в массиве конструктора поля. Параметр принимает функцию, которая возвращает массив модификаторов. Массив параметров конструктора остался для совместимости, в новом коде используйте `addFetchDataModifier()`.
+
+### Параметры метода getList
+
+#### Select
+
+Параметр `select` задается как массив с именами полей сущности.
+
+```php
+BookTable::getList([
+    'select' => ['ISBN', 'TITLE', 'PUBLISH_DATE']
+]);
+// SELECT ISBN, TITLE, PUBLISH_DATE FROM my_book
+```
+
+Чтобы изменить названия полей, используйте алиасы. Алиасы позволяют переименовывать поля в результирующем наборе данных для удобства. Например, чтобы поле `PUBLISH_DATE` отображалось как `PUBLICATION`:
+
+```php
+BookTable::getList([
+    'select' => ['ISBN', 'TITLE', 'PUBLICATION' => 'PUBLISH_DATE']
+]);
+// SELECT ISBN, TITLE, PUBLISH_DATE AS PUBLICATION FROM my_book
+```
+
+Для выбора всех полей используйте символ `*`.
+
+```php
+BookTable::getList([
+    'select' => ['*']
+]);
+```
+
+При этом выберутся только скалярные поля `ScalarField`. Скалярные поля — это обычные поля таблицы. Вычисляемые поля `ExpressionField` и связи с другими сущностями нужно указывать в запросе. Они создаются на основе выражений и не являются частью таблицы по умолчанию.
+
+#### Filter
+
+Параметр `filter` задает условия для выборки данных в виде ассоциативного массива. Ключи массива это условия, а значения — параметры для поиска.
+
+```php
+// WHERE ID = 1
+BookTable::getList([
+    'filter' => ['=ID' => 1]
+]);
+
+// WHERE TITLE LIKE 'Patterns%'
+BookTable::getList([
+    'filter' => ['%=TITLE' => 'Patterns%']
+]);
+```
+
+Фильтр может быть многоуровневым с использованием `AND` или `OR`, что позволяет комбинировать условия:
+
+```php
+// WHERE ID = 1 AND ISBN = '9780321127426'
+BookTable::getList([
+    'filter' => [
+        '=ID' => 1,
+        '=ISBN' => '9780321127426'
+    ]
+]);
+
+// WHERE (ID=1 AND ISBN='9780321127426') OR (ID=2 AND ISBN='9781449314286')
+BookTable::getList([
+    'filter' => [
+        'LOGIC' => 'OR',
+        [
+            '=ID' => 1,
+            '=ISBN' => '9780321127426'
+        ],
+        [
+            '=ID' => 2,
+            '=ISBN' => '9781449314286'
+        ]
+    ]
+]);
+```
+
+**Операторы сравнения**
+
+Операторы сравнения позволяют задавать условия фильтрации.
+
+-  `=` — равно, работает и с массивами
+
+-  `%` — подстрока
+
+-  `>` — больше
+
+-  `<` — меньше
+
+-  `@` — IN (EXPR), принимает массив или объект `DB\SqlExpression`
+
+-  `!@` — NOT IN (EXPR), принимает массив или объект `DB\SqlExpression`
+
+-  `!=` — не равно
+
+-  `!%` — не подстрока
+
+-  `><` — между, принимает массив `array(MIN, MAX)`
+
+-  `>=` — больше или равно
+
+-  `<=` — меньше или равно
+
+-  `=%` — поиск по шаблону, аналогично `LIKE` в SQL. Шаблон задается в значении условия
+
+-  `%=` — поиск по шаблону, аналогично `LIKE` в SQL. Эквивалентен оператору `=%`
+
+**Префиксы**
+
+Префиксы `%=` и `=%` эквивалентны и используются для поиска по шаблону `LIKE`. Положение символа `%` задается в значении условия.
+
+В примерах ниже используется запись `'%=NAME'`. Запись `'=%NAME'` работает аналогично.
+
+-  `'%=NAME' => 'тест'` — точное значение без символов `%`
+
+-  `'%=NAME' => 'тест%'` — содержит «тест» в начале
+
+-  `'%=NAME' => '%тест'` — содержит «тест» в конце
+
+-  `'%=NAME' => '%тест%'` — содержит подстроку «тест»
+
+Последний вариант отличается от `'%NAME' => 'тест'` тем, что в `'%=NAME'` шаблон `LIKE` задается явно в значении условия.
+
+-  `==` — булево выражение для `ExpressionField`, например, `EXISTS()` или `NOT EXISTS()`
+
+-  `!><` — не между, принимает массив `array(MIN, MAX)`
+
+-  `!=%` — NOT LIKE
+
+-  `!%=` — NOT LIKE
+
+-  `'==ID' => null` — ID равно NULL. В SQL — `ID IS NULL`
+
+-  `'!==NAME' => null` — NAME не равно NULL. В SQL — `NAME IS NOT NULL`
+
+{% note warning "" %}
+
+В массиве `filter` выбор оператора по умолчанию зависит от типа поля и значения. Для строкового поля непустое значение обычно задает шаблон `LIKE`. Символы `%` автоматически не добавляются. Например, условие `'TITLE' => 'Patterns%'` ищет названия, которые начинаются с `Patterns`. Строка только из цифр сравнивается через `=`, а массив строк задает несколько условий `LIKE`, объединенных через `OR`.
+
+Для целочисленного поля одно ненулевое значение сравнивается через `=`, а массив значений — через `IN`. Значение `0` без префикса также допускает `NULL`. Чтобы задать точное сравнение, используйте префикс `=`, а для проверки вхождения в список — `@`.
+
+Правило относится к ассоциативному массиву `filter`. Метод `where('FIELD', $value)` без отдельного оператора использует `=`.
+
+{% endnote %}
+
+**Для полей типа int**
+
+Если передать массив значений в фильтр для поля типа `int`, фреймворк автоматически преобразует это в SQL-запрос с использованием `IN()`. Оператор `IN` проверит, входит ли значение поля в указанный список.
+
+```php
+$result = BookTable::getList([
+    'filter' => [
+        'ID' => [1, 2, 3] // Массив значений для фильтрации
+    ]
+]);
+
+// Bitrix ORM преобразует этот запрос в SQL:
+// SELECT * FROM my_book WHERE ID IN (1, 2, 3);
+```
+
+#### Group
+
+Параметр `group` задает поля для группировки. Это позволяет объединять записи с одинаковыми значениями в указанных полях:
+
+```php
+BookTable::getList([
+    'group' => ['PUBLISH_DATE']
+]);
+```
+
+Чаще всего группировку указывать не нужно — система сделает это автоматически.
+
+#### Order
+
+Параметр `order` задает порядок сортировки.
+
+```php
+BookTable::getList([
+    'order' => ['PUBLISH_DATE' => 'DESC', 'TITLE' => 'ASC']
+]);
+
+BookTable::getList([
+    'order' => ['ID'] // направление по умолчанию — ASC
+]);
+```
+
+-  `ASC` — по возрастанию
+
+-  `DESC` — по убыванию
+
+#### Limit и Offset
+
+Параметры `limit` и `offset`  ограничивают количество записей и создают постраничную выборку.
+
+```php
+// 10 последних записей
+BookTable::getList([
+    'order' => ['ID' => 'DESC'],
+    'limit' => 10
+]);
+
+// Получить записи для пятой страницы, если на каждой странице отображается по 20 записей
+BookTable::getList([
+    'order' => ['ID'],
+    'limit' => 20,
+    'offset' => 80
+]);
+```
+
+#### Runtime
+
+Параметр `runtime` добавляет временные поля, которые вычисляются во время выполнения запроса.
+
+**Пример подсчета записей**\
+Для подсчета количества записей используйте `ExpressionField`:
+
+```php
+use Bitrix\Main\ORM;
+
+BookTable::getList([
+    'select' => ['CNT'],
+    'runtime' => [
+        new ORM\Fields\ExpressionField('CNT', 'COUNT(*)')
+    ]
+]);
+// посчитать общее количество записей в таблице
+// SELECT COUNT(*) AS CNT FROM my_book
+```
+
+Здесь вычисляемое поле реализует SQL-выражение с функцией `COUNT`.
+
+**Использование в фильтрах**\
+После того, как добавили вычисляемое поле, его можно использовать в фильтрах:
+
+```php
+use Bitrix\Main\ORM;
+
+BookTable::getList([
+    'select' => ['PUBLISH_DATE'],
+    'filter' => ['>CNT' => 5],
+    'runtime' => [
+        new ORM\Fields\ExpressionField('CNT', 'COUNT(*)')
+    ]
+]);
+// посчитать общее количество записей в таблице
+// выбрать те дни, когда выпущено более 5 книг
+// SELECT PUBLISH_DATE, COUNT(*) AS CNT FROM my_book GROUP BY PUBLISH_DATE HAVING COUNT(*) > 5
+```
+
+Система автоматически группирует по `PUBLISH_DATE`.
+
+**Регистрация других типов полей**
+
+В `runtime` можно регистрировать не только `Expression` поля, но и другие типы. Механизм `runtime` добавляет поле к сущности, как если бы оно было описано в `getMap`. Однако такое поле доступно только в рамках одного запроса и требует повторной регистрации в следующем вызове `getList`.
+
+**Вычисляемые поля без runtime**
+
+Если вычисляемое поле нужно только в `select`, `runtime` можно не использовать. Система поддерживает вложенные выражения, которые разворачиваются в финальном SQL.
+
+```php
+use Bitrix\Main\ORM;
+
+BookTable::getList([
+    'select' => [
+        new ORM\Fields\ExpressionField('MAX_AGE', 'MAX(%s)', ['AGE_DAYS'])
+    ]
+]);
+// SELECT MAX(DATEDIFF(NOW(), PUBLISH_DATE)) AS MAX_AGE FROM my_book
+```
+
+-  Создается вычисляемое поле `MAX_AGE` через `ExpressionField`
+
+-  Используется вложенное выражение `MAX(%s)`, где `%s` заменяется на `AGE_DAYS`
+
+-  `AGE_DAYS` автоматически разворачивается в `DATEDIFF(NOW(), PUBLISH_DATE)`
+
+Вложенные выражения разворачиваются последовательно.
+
+{% note warning "" %}
+
+Функция `DATEDIFF()` есть только в MySQL. ORM подставляет текст выражения в SQL без изменений, поэтому на PostgreSQL такой запрос завершится ошибкой. Если модуль должен работать с обеими СУБД, замените функции MySQL по правилам из статьи [Как писать код, совместимый с PostgreSQL](./../database/postgresql/compatible-code.md). Класс [SqlHelper](./../database/sql-helper-and-expression.md) возвращает функции текущей даты и арифметику дат для текущей СУБД.
+
+{% endnote %}
+
+#### Count_total
+
+Чтобы узнать общее количество записей, которые соответствуют запросу, передайте параметр `count_total` со значением `true`. Метод `getCount()` возвращает количество без учета `limit` и `offset`. Сами ограничения продолжают действовать при получении данных.
+
+**Пример.** Запрос выбирает до десяти книг и подсчитывает общее количество книг для постраничного вывода:
+
+```php
+$result = BookTable::getList([
+    'select' => ['ID', 'TITLE'],
+    'order' => ['ID' => 'ASC'],
+    'limit' => 10,
+    'offset' => 0,
+    'count_total' => true
+]);
+
+$total = $result->getCount(); // общее количество записей
+$rows = $result->fetchAll(); // не более десяти записей
+```
+
+Для подсчета ORM при необходимости выполняет дополнительный запрос.
+
+### Кеширование выборки
+
+Кеширование выборки позволяет сохранять результаты запросов для повторного использования. По умолчанию кеширование отключено.
+
+Для включения кеширования используйте ключ `cache` в методе `getList`:
+
+```php
+$res = \Bitrix\Main\GroupTable::getList([
+    'filter' => ['=ID' => 1],
+    'cache' => ['ttl' => 3600] // Время жизни кеша в секундах
+]);
+```
+
+То же самое можно сделать с помощью объекта `Query`:
+
+```php
+$query = \Bitrix\Main\GroupTable::query();
+$query->setSelect(['*']);
+$query->setFilter(['=ID' => 1]);
+$query->setCacheTtl(150);
+$res = $query->exec();
+```
+
+**Особенности кеширования**
+
+-  Если данные найдены в кеше, в результате кешированной выборки вернется объект `ArrayResult`.
+
+-  По умолчанию выборки с `JOIN` не кешируются. Чтобы включить кеширование  с `JOIN` используйте ключ `cache_joins`.
+
+```php
+$res = \Bitrix\Main\GroupTable::getList([
+    'cache' => ['ttl' => 3600, 'cache_joins' => true]
+]);
+
+// или
+$query = \Bitrix\Main\GroupTable::query();
+$query->cacheJoins(true);
+```
+
+**Сброс кеша**
+
+Кеш автоматически сбрасывается при вызове методов `add`, `update`, `delete`. Для принудительного сброса кеша используйте метод `cleanCache()`.
+
+```php
+/* Пример для таблицы пользователей */
+\Bitrix\Main\UserTable::getEntity()->cleanCache();
+```
+
+**Настройки администратора**
+
+Администратор проекта может запретить кеширование или изменить время жизни кеша TTL.
+
+## Короткие вызовы
+
+Для упрощения работы с данными, помимо метода `getList`, доступны более короткие методы:
+
+-  `getById($id)` — выборка по первичному ключу.
+
+-  `getByPrimary($primary, array $parameters)` — выборка по первичному ключу с дополнительными параметрами.
+
+В обоих методах `id` можно передавать как число или массив. Массив используется, если есть несколько первичных полей. Если элемент массива не является первичным ключом, возникнет ошибка.
+
+```php
+BookTable::getById(1);
+BookTable::getByPrimary(['ID' => 1]);
+
+// Эти вызовы аналогичны следующему вызову getList:
+BookTable::getList([
+    'filter' => ['=ID' => 1]
+]);
+```
+
+-  `getRowById($id)` — выборка по первичному ключу, возвращает массив данных.
+
+```php
+$row = BookTable::getRowById($id);
+// Аналогичный результат можно получить так:
+$result = BookTable::getById($id);
+$row = $result->fetch();
+// Или так:
+$result = BookTable::getList([
+    'filter' => ['=ID' => $id]
+]);
+$row = $result->fetch();
+```
+
+-  `getRow(array $parameters)` — выборка по другим параметрам, возвращает одну запись.
+
+```php
+$row = BookTable::getRow([
+    'filter' => ['%=TITLE' => 'Patterns%'],
+    'order' => ['ID']
+]);
+
+// Аналогичный результат можно получить так:
+$result = BookTable::getList([
+    'filter' => ['%=TITLE' => 'Patterns%'],
+    'order' => ['ID'],
+    'limit' => 1
+]);
+$row = $result->fetch();
+```
+
+## Предустановленные выборки
+
+Предустановленные выборки позволяют заранее задавать параметры для выборки данных: фильтры, сортировки или выбор полей. Их можно разделить на два уровня:
+
+1. Глобальная область данных — настройки применяются ко всем запросам, связанным с определенной сущностью.
+
+2. Локальная область данных — настройки применяются только к конкретному запросу и могут быть изменены.
+
+### Глобальная область данных
+
+Одну таблицу можно описать несколькими сущностями, разделив записи на сегменты. Метод `setDefaultScope` выполняется при каждом запросе, задавая фильтры и другие параметры.
+
+```php
+use Bitrix\Main\ORM\Query\Query;
+
+class Element4Table extends \Bitrix\Iblock\ElementTable
+{
+    public static function getTableName()
+    {
+        return 'b_iblock_element';
+    }
+    public static function setDefaultScope(Query $query)
+    {
+        $query->where("IBLOCK_ID", 4);
+    }
+}
+
+class Element5Table extends \Bitrix\Iblock\ElementTable
+{
+    public static function getTableName()
+    {
+        return 'b_iblock_element';
+    }
+    public static function setDefaultScope(Query $query)
+    {
+        $query->where("IBLOCK_ID", 5);
+    }
+}
+```
+
+1. `getTableName`  указывает имя общей таблицы `b_iblock_element`. Ее используют обе сущности.
+
+2. `setDefaultScope` определяет дополнительные условия для каждого запроса:
+
+   -  в классе `Element4Table` фильтруются записи с `IBLOCK_ID = 4`.
+
+   -  в классе `Element5Table` фильтруются записи с `IBLOCK_ID = 5`.
+
+Хотя обе сущности работают с одной таблицей, они оперируют разными наборами данных благодаря настроенным фильтрам.
+
+### Локальная область данных
+
+На пользовательском уровне можно задавать предустановленные выборки с помощью методов `with*`, аналога `setDefaultScope`. В примерах ниже показаны фрагменты собственного ORM-класса `UserTable`, в котором уже описаны поля `ACTIVE` и `LOGIN`.
+
+```php
+use Bitrix\Main\ORM\Data\DataManager;
+use Bitrix\Main\ORM\Query\Query;
+
+class UserTable extends DataManager
+{
+    // getTableName() и getMap() описаны в ORM-классе
+
+    // Метод withActive добавляет условие фильтрации по полю ACTIVE
+    public static function withActive(Query $query)
+    {
+        $query->where('ACTIVE', true); // Фильтр ACTIVE = true
+    }
+}
+
+// Использование метода withActive
+$activeUsers = UserTable::query()
+    ->withActive() // Применяем фильтр для активных пользователей
+    ->fetchCollection() // Выполняем запрос и получаем коллекцию
+;
+// WHERE `ACTIVE`='Y'
+```
+
+1. Метод `withActive` добавляет условие `WHERE ACTIVE = true` к запросу.
+
+2. Запрос выполняется только для активных пользователей.
+
+Метод принимает объект `Bitrix\Main\ORM\Query\Query`, позволяя задавать фильтры и другие параметры. Можно добавить свои аргументы:
+
+```php
+use Bitrix\Main\ORM\Data\DataManager;
+use Bitrix\Main\ORM\Query\Query;
+
+class UserTable extends DataManager
+{
+    // getTableName() и getMap() описаны в ORM-классе
+
+    // Метод withActive принимает значение для фильтрации и добавляет поле LOGIN в выборку
+    public static function withActive(Query $query, $value)
+    {
+        $query
+            ->addSelect('LOGIN') // Добавляем поле LOGIN в выборку
+            ->where('ACTIVE', $value) // Фильтр ACTIVE = $value
+        ;
+    }
+}
+
+// Использование метода withActive
+$activeUsers = UserTable::query()
+    ->withActive(false) // Применяем фильтр для неактивных пользователей
+    ->fetchCollection() // Выполняем запрос и получаем коллекцию
+;
+
+// SELECT `LOGIN` ... WHERE `ACTIVE`='N'
+```
+
+1. Метод `withActive` добавляет поле `LOGIN` в выборку с помощью `addSelect`.
+
+2. Фильтр `WHERE ACTIVE = $value` применяется в зависимости от переданного значения. В примере передаем `false`.
+
+3. Запрос выполняется для неактивных пользователей `ACTIVE = 'N'`.
+
+## Выборки в отношениях 1:N и N:M
+
+При работе с отношениями 1:N и N:M могут возникнуть две основные проблемы.
+
+### Некорректная работа LIMIT
+
+При использовании метода `setLimit` в запросах с отношениями 1:N и N:M может возникнуть неожиданное поведение. Ограничение LIMIT применяется на уровне SQL-запроса и ограничивает общее количество строк в результате, включая связанные записи. Например, если у элемента есть несколько значений для множественного свойства, каждое из этих значений будет считаться отдельной строкой. В результате вместо ожидаемых 5 элементов может быть выбрано меньше, либо один элемент с неполными значениями свойств.
+
+```php
+$query = BookTable::query()
+    ->addSelect('TITLE')
+    ->addSelect('AUTHORS')
+    ->setLimit(5)
+;
+$books = $query->fetchCollection();
+
+// SQL-запрос:
+/*
+SELECT ... FROM `my_book`
+LEFT JOIN `my_book_author` ...
+LIMIT 5
+*/
+```
+
+### Декартово произведение при выборке нескольких отношений
+
+Декартово произведение возникает, когда каждая строка одной таблицы соединяется с каждой строкой другой таблицы, что приводит к резкому увеличению количества строк в результате. При выборке нескольких связанных полей в одном запросе результат может значительно увеличиваться в размере.
+
+```php
+$query = BookTable::query()
+    ->addSelect('TITLE')
+    ->addSelect('AUTHORS')
+    ->addSelect('STORE_ITEMS')
+;
+$books = $query->fetchCollection();
+
+// SQL-запрос
+/*
+SELECT ... FROM `my_book`
+LEFT JOIN `my_book_author` ... // 15 значений
+LEFT JOIN `my_store_book` ... // 7 значений
+*/
+```
+
+-  Каждое добавленное свойство создает LEFT JOIN
+
+-  Результат представляет декартово произведение всех связанных записей.
+
+-  Если у книги 15 авторов и 7 записей о наличии в магазинах, будет выбрано 15 \* 7 = 105 строк вместо ожидаемых 15 + 7 = 22 строки.
+
+-  Это может привести к нехватке памяти и снижению производительности при большом количестве свойств или значений.
+
+### Решение проблем
+
+Для решения этих проблем используется класс `Bitrix\Main\ORM\Query\QueryHelper` с методом `decompose`.
+
+```php
+public static function decompose(Query $query, $fairLimit = true, $separateRelations = true)
+```
+
+Метод имеет два основных параметра:
+
+1. `fairLimit` . По умолчанию — `true.` Разбивает запрос на два этапа:
+
+   -  Сначала выбираются `ID` основных записей с учетом `LIMIT` и `OFFSET`
+
+   -  Затем для найденных `ID` выбираются все отношения
+
+2. `separateRelations`. По умолчанию — `true.` Выбирает каждое отношение 1:N или N:M отдельным запросом, что исключает возникновение декартова произведения
+
+В результате возвращается коллекция объектов с объединенными данными. Сортировка применяется только к основным записям. Порядок объектов отношений внутри основных обычно не имеет значения
+
+## Фильтр ORM
+
+Фильтр ORM позволяет задавать условия для выборки данных из базы.
+
+### Одиночные условия
+
+1. **Простой** **запрос**
+
+   Для выборки данных по конкретному условию используйте метод `where`. Например, чтобы выбрать пользователя с `ID = 1`:
+
+   ```php
+   \Bitrix\Main\UserTable::query()
+       ->where("ID", 1)
+       ->exec()
+   ;
+   // WHERE `main_user`.`ID` = 1
+   ```
+
+2. **Использование других операторов**
+
+   Вы можете использовать различные операторы для сравнения. Например, чтобы выбрать пользователей с ID меньше 10:
+
+   ```php
+   \Bitrix\Main\UserTable::query()
+       ->where("ID", "<", 10)
+       ->exec()
+   ;
+   // WHERE `main_user`.`ID` < 10
+   ```
+
+   В `\Bitrix\Main\ORM\Query\Filter\Operator::$operators` доступны следующие операторы: `=`, `<>`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `between`, `like`, `exists`.
+
+3. **Дополнительные методы**
+
+   -  `whereNull($column)` — является ли значение `NULL`.
+
+   -  `whereIn($column, $values|Query|SqlExpression)` —  входит ли значение в указанный список
+
+   -  `whereBetween($column, $valueMin, $valueMax)` —  находится ли значение в заданном диапазоне.
+
+   -  `whereLike($column, $value)` —  соответствует ли значение шаблону.
+
+   -  `whereExists($query|SqlExpression)` — проверяет существование подзапроса.
+
+   Пример. Выбрать записи, где `ID` равно `NULL`:
+
+   ```php
+   \Bitrix\Main\UserTable::query()
+       ->whereNull("ID")
+       ->exec()
+   ;
+   // WHERE `main_user`.`ID` IS NULL
+   ```
+
+4. **Методы whereNot\***
+
+   Для каждого метода `where*` существует аналог `whereNot*`, например, `whereNotNull`, `whereNotIn`, и так далее.
+
+   **Пример.** Выбрать записи, где `ID` равно `NOT NULL`:
+
+   ```php
+   \Bitrix\Main\UserTable::query()
+       ->whereNotNull("ID")
+       ->exec()
+   ;
+   // WHERE `main_user`.`ID` IS NOT NULL
+   ```
+
+5. **Произвольные выражения с whereExpr**
+
+   Для сложных условий используйте `whereExpr`, который позволяет задавать произвольные SQL-выражения:
+
+   ```php
+   \Bitrix\Main\UserTable::query()
+       ->whereExpr('JSON_CONTAINS(%s, 4)', ['SOME_JSON_FIELD'])
+       ->exec()
+   ;
+   // WHERE JSON_CONTAINS(`main_user`.`SOME_JSON_FIELD`, 4)
+   ```
+
+   Аргументы выражения аналогичны конструктору поля `ExpressionField` и подставляются через `sprintf`.
+
+   {% note warning "" %}
+
+   Текст выражения попадает в SQL без изменений. Функция `JSON_CONTAINS()` из примера есть только в MySQL, на PostgreSQL такой запрос завершится ошибкой. Для модуля, который работает с обеими СУБД, используйте конструкции из статьи [Как писать код, совместимый с PostgreSQL](./../database/postgresql/compatible-code.md).
+
+   {% endnote %}
+
+6. **Сравнение** **с другим полем**
+
+   Метод `whereColumn` упрощает сравнение полей.
+
+   ```php
+   \Bitrix\Main\UserTable::query()
+       ->whereColumn('NAME', 'LOGIN')
+       ->exec()
+   ;
+   // WHERE `main_user`.`NAME` = `main_user`.`LOGIN`
+   ```
+
+   Этот метод аналогичен вызову:
+
+   ```php
+   \Bitrix\Main\UserTable::query()
+       ->where('NAME', new \Bitrix\Main\ORM\Query\Filter\Expressions\ColumnExpression('LOGIN'))
+       ->exec()
+   ;
+   // WHERE `main_user`.`NAME` = `main_user`.`LOGIN`
+   ```
+
+   Метод `whereIn` позволяет гибко использовать колонки в фильтре.
+
+   ```php
+   \Bitrix\Main\UserTable::query()
+       ->whereIn('LOGIN', [
+           new \Bitrix\Main\ORM\Query\Filter\Expressions\ColumnExpression('NAME'),
+           new \Bitrix\Main\ORM\Query\Filter\Expressions\ColumnExpression('LAST_NAME')
+       ])
+       ->exec()
+   ;
+   // WHERE `main_user`.`LOGIN` IN (`main_user`.`NAME`, `main_user`.`LAST_NAME`)
+   ```
+
+   Колонки воспринимаются как поля сущностей, а не произвольные SQL-выражения.
+
+### Множественные условия
+
+Используйте метод `where` несколько раз, чтобы добавлять несколько условий в запрос:
+
+```php
+\Bitrix\Main\UserTable::query()
+    ->where('ID', '>', 1)
+    ->where('ACTIVE', true)
+    ->whereNotNull('PERSONAL_BIRTHDAY')
+    ->whereLike('NAME', 'A%')
+    ->exec()
+;
+// WHERE `main_user`.`ID` > 1 AND `main_user`.`ACTIVE` = 'Y' AND `main_user`.`PERSONAL_BIRTHDAY` IS NOT NULL AND `main_user`.`NAME` LIKE 'A%'
+```
+
+{% note info "" %}
+
+Для boolean полей со значениями `Y/N`, `1/0` и так далее, можно использовать `true` и `false` в условиях.
+
+{% endnote %}
+
+Несколько условий можно указать в одном вызове `where`:
+
+```php
+\Bitrix\Main\UserTable::query()
+    ->where([
+        ['ID', '>', 1],
+        ['ACTIVE', true],
+        ['PERSONAL_BIRTHDAY', '<>', null],
+        ['NAME', 'like', 'A%']
+    ])
+    ->exec()
+;
+// WHERE `main_user`.`ID` > 1 AND `main_user`.`ACTIVE` = 'Y' AND `main_user`.`PERSONAL_BIRTHDAY` IS NOT NULL AND `main_user`.`NAME` LIKE 'A%'
+```
+
+### OR и вложенные фильтры
+
+Для хранения условий фильтра используется контейнер `\Bitrix\Main\ORM\Query\Filter\ConditionTree`. Он позволяет добавлять другие экземпляры `ConditionTree` для создания вложенных условий.
+
+**Пример простого фильтра**
+
+```php
+\Bitrix\Main\UserTable::query()
+    ->where([
+        ['ID', '>', 1],
+        ['ACTIVE', true]
+    ])
+    ->exec()
+;
+// WHERE `main_user`.`ID` > 1 AND `main_user`.`ACTIVE` = 'Y'
+```
+
+**Вложенные фильтры**\
+Вы можете использовать вложенные фильтры для более сложных условий:
+
+```php
+use Bitrix\Main\ORM\Query\Query;
+
+\Bitrix\Main\UserTable::query()
+    ->where(Query::filter()->where([
+        ["ID", '>', 1],
+        ['ACTIVE', true]
+    ]))->exec()
+;
+// WHERE `main_user`.`ID` > 1 AND `main_user`.`ACTIVE` = 'Y'
+```
+
+**Использование логики OR**\
+Для объединения условий с логикой `OR`:
+
+```php
+use Bitrix\Main\ORM\Query\Query;
+
+\Bitrix\Main\UserTable::query()
+    ->where('ACTIVE', true)
+    ->where(Query::filter()
+        ->logic('or')
+        ->where([
+            ['ID', 1],
+            ['LOGIN', 'admin']
+        ])
+    )->exec()
+;
+// WHERE `main_user`.`ACTIVE` = 'Y' AND (`main_user`.`ID` = 1 OR `main_user`.`LOGIN` = 'admin')
+```
+
+**Цепочка вызовов с OR**\
+Вы также можете использовать цепочку вызовов для создания условий с `OR`:
+
+```php
+use Bitrix\Main\ORM\Query\Query;
+
+\Bitrix\Main\UserTable::query()
+    ->where('ACTIVE', true)
+    ->where(Query::filter()
+        ->logic('or')
+        ->where('ID', 1)
+        ->where('LOGIN', 'admin')
+    )
+    ->exec()
+;
+// WHERE `main_user`.`ACTIVE` = 'Y' AND (`main_user`.`ID` = 1 OR `main_user`.`LOGIN` = 'admin')
+```
+
+### Выражения
+
+В фильтре можно использовать `ExpressionField`, который автоматически регистрируется как runtime поле. Это позволяет создавать сложные условия:
+
+```php
+use Bitrix\Main\ORM\Fields\ExpressionField;
+
+\Bitrix\Main\UserTable::query()
+    ->where(new ExpressionField('LNG', 'LENGTH(%s)', 'LAST_NAME'), '>', 10)
+    ->exec()
+;
+// WHERE LENGTH(`main_user`.`LAST_NAME`) > '10'
+```
+
+Для упрощения таких конструкций используйте хелпер. Хелпер — это вспомогательный метод, который упрощает работу с выражениями. `Query::expr()` является хелпером, который позволяет использовать SQL-функции:
+
+```php
+use Bitrix\Main\ORM\Query\Query;
+\Bitrix\Main\UserTable::query()
+    ->where(Query::expr()->length("LAST_NAME"), '>', 10)
+    ->exec()
+;
+// WHERE LENGTH(`main_user`.`LAST_NAME`) > '10'
+
+\Bitrix\Main\UserTable::query()
+    ->addSelect(Query::expr()->count("ID"), 'CNT')
+    ->exec()
+;
+// SELECT COUNT(`main_user`.`ID`) AS `CNT` FROM `b_user` `main_user`
+```
+
+Часто используемые SQL-выражения в хелпере:
+
+-  `count` — подсчитывает количество строк
+
+-  `countDistinct` — подсчитывает количество уникальных значений
+
+-  `sum` — вычисляет сумму значений
+
+-  `min` — находит минимальное значение
+
+-  `avg` — вычисляет среднее значение
+
+-  `max` — находит максимальное значение
+
+-  `length` — определяет длину строки
+
+-  `lower` — преобразует строку в нижний регистр
+
+-  `upper` — преобразует строку в верхний регистр
+
+-  `concat` — объединяет несколько строк в одну
+
+### Совместимость с getList
+
+При использовании `getList`, фильтр можно вставить вместо массива:
+
+```php
+use Bitrix\Main\ORM\Query\Query;
+\Bitrix\Main\UserTable::getList([
+    'filter' => ['=ID' => 1]
+]);
+
+\Bitrix\Main\UserTable::getList([
+    'filter' => Query::filter()
+        ->where('ID', 1)
+]);
+// WHERE `main_user`.`ID` = 1
+```
+
+### Условия JOIN
+
+Референсы — это связи между таблицами, которые позволяют объединять данные из разных таблиц. Они описываются с помощью `Reference`:
+
+```php
+use Bitrix\Main\GroupTable;
+use Bitrix\Main\ORM\Fields\Relations\Reference;
+use Bitrix\Main\ORM\Query\Join;
+
+new Reference('GROUP', GroupTable::class,
+    Join::on('this.GROUP_ID', 'ref.ID')
+)
+```
+
+Метод `on` — это сокращенная запись `Query::filter()` с предустановленным условием по колонкам. Он позволяет строить условия JOIN:
+
+```php
+use Bitrix\Main\GroupTable;
+use Bitrix\Main\ORM\Fields\Relations\Reference;
+use Bitrix\Main\ORM\Query\Filter\Expressions\ColumnExpression;
+use Bitrix\Main\ORM\Query\Join;
+
+new Reference('GROUP', GroupTable::class,
+    Join::on('this.GROUP_ID', 'ref.ID')
+        ->where('ref.ACTIVE', 'Y')
+        ->where('ref.STRING_ID', new ColumnExpression('this.GROUP_CODE'))
+)
+```
+
+Везде, где указывается имя поля, можно указать любую цепочку переходов:
+
+```php
+->whereColumn('this.AUTHOR.UserGroup:USER.GROUP.OWNER.ID', 'ref.ID')
+;
+```
+
+### Формат массива
+
+Для использования фильтра в виде массива существует метод конвертации из массива в объект `\Bitrix\Main\ORM\Query\Filter\ConditionTree::createFromArray`. Формат массива:
+
+```php
+$filter = [
+    ['FIELD', '>', 2],
+    [
+        'logic' => 'or',
+        ['FIELD', '<', 8],
+        ['SOME', 9]
+    ],
+    ['FIELD', 'in', [5, 7, 11]],
+    ['FIELD', '=', ['column' => 'FIELD2']],
+    ['FIELD', 'in', [
+        ['column' => 'FIELD1'],
+        ['value' => 'FIELD2'],
+        ['FIELD3']
+    ]],
+    [
+        'negative' => true,
+        ['FIELD', '>', 19]
+    ],
+];
+```
+
+{% note warning "" %}
+
+Будьте осторожны при использовании массивов. Не подставляйте сырые данные, переданные пользователем, в качестве фильтра — они могут содержать опасные условия для раскрытия данных БД. Проверяйте все входящие условия через [белый список полей](./../security/sql-injection.md).
+
+{% endnote %}
+
+**Сравнение значений**
+
+-  Обычное сравнение: `['FIELD', '>', 2]`
+
+-  С ключом `value`: `['FIELD', '>', ['value' => 2]]`
+
+-  Сравнение с колонкой: `['FIELD1', '>', ['column' => 'FIELD2']]`
+
+**Вложенные фильтры и логика**
+
+Вложенные фильтры передаются в виде вложенных массивов. Для отрицания `negative()` и изменения логики `logic()` используются одноименные ключи:
+
+```php
+$filter = [
+    ['FIELD', '>', 2],
+    [
+        'logic' => 'or',
+        ['FIELD', '<', 8],
+        ['SOME', 9]
+    ],
+    [
+        'negative' => true,
+        ['FIELD', '>', 19]
+    ]
+];
+```
+
+**Операторы сравнения**
+
+Остальные методы `where*` заменяются соответствующими операторами сравнения `in`, `between`, `like` и так далее:
+
+```php
+['FIELD', 'in', [5, 7, 11]]
+```

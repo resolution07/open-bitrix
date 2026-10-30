@@ -1,0 +1,654 @@
+---
+title: Пре- и постфильтры
+description: 'Пре- и постфильтры. Документация по Bitrix Framework: принципы работы, архитектура и примеры использования.'
+---
+
+Фильтры — это обработчики, которые выполняются до или после действия контроллера (Action). Они могут отменить выполнение действия или изменить его результат. Фильтры помогают сделать код более модульным и управляемым, обеспечивая дополнительный уровень контроля над выполнением действий.
+
+## Типы фильтров
+
+-  Префильтры (prefilter) — выполняются до запуска действия. Могут отменить выполнение.
+
+-  Постфильтры (postfilter) — выполняются после действия. Могут изменить результат.
+
+## Основные фильтры
+
+### Фильтр HTTP-методов
+
+`\Bitrix\Main\Engine\ActionFilter\HttpMethod`
+
+Проверяет HTTP-метод действия и блокирует выполнение, если метод не разрешен. Нужен, когда необходимо ограничить выполнение действия только определенными HTTP-методами, например, POST для изменения данных.
+
+Аргументы:
+
+-  `$allowedMethods` — список допустимых HTTP-методов. По умолчанию — `[HttpMethod::METHOD_GET]`.
+
+При создании фильтра без аргументов `new HttpMethod()` разрешает только `GET`. Стандартный контроллер в методе `getDefaultPreFilters()` явно передает `GET` и `POST`. Метод `BX.ajax.runAction()` по умолчанию отправляет `POST`, поэтому при самостоятельной настройке фильтра для такого вызова добавьте `HttpMethod::METHOD_POST` в список допустимых методов.
+
+Пример использования:
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Attribute\Rule\Prefilters;
+use Bitrix\Main\Engine\ActionFilter\HttpMethod;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[Prefilters([
+        new HttpMethod([
+            HttpMethod::METHOD_GET,
+            HttpMethod::METHOD_POST,
+        ]),
+    ])]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+Атрибут `HttpMethod` также принимает массив допустимых HTTP-методов в первом аргументе:
+
+```php
+use Bitrix\Main\Engine\ActionFilter\HttpMethod;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[\Bitrix\Main\Engine\ActionFilter\Attribute\Rule\HttpMethod([
+        HttpMethod::METHOD_GET,
+        HttpMethod::METHOD_POST,
+    ])]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+### Фильтр аутентификации
+
+`\Bitrix\Main\Engine\ActionFilter\Authentication`
+
+Проверяет аутентификацию пользователя и блокирует действие, если проверка не пройдена. Без редиректа фильтр возвращает HTTP-статус 401. С включенным редиректом фильтр перенаправляет пользователя на страницу `/auth/?backurl=<текущий URL>` для не-AJAX-запросов.
+
+Используйте фильтр для действий, которые требуют аутентификации: личный кабинет, настройки профиля, операции с данными текущего пользователя.
+
+Аргументы:
+
+-  `$enableRedirect` — включает редирект на страницу `/auth/?backurl=<текущий URL>`. По умолчанию — `false`.
+
+Пример использования:
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Attribute\Rule\Prefilters;
+use Bitrix\Main\Engine\ActionFilter\Authentication;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[Prefilters([
+        new Authentication(true),
+    ])]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+Имеет аналог в виде атрибута:
+
+```php
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[\Bitrix\Main\Engine\ActionFilter\Attribute\Rule\Authentication(true)]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+#### Перенаправить гостя на другую страницу
+
+Стандартный фильтр `Authentication` возвращает HTTP-статус 401 или перенаправляет неавторизованного пользователя на страницу `/auth/?backurl=<текущий URL>`. Указать другой URL в фильтре нельзя.
+
+Для перенаправления на произвольную страницу создайте собственный префильтр. В методе `onBeforeAction()` проверьте авторизацию и вызовите `LocalRedirect()` с нужным URL.
+
+```php
+use Bitrix\Main\Application;
+use Bitrix\Main\Engine\ActionFilter\Base;
+use Bitrix\Main\Event;
+
+final class RedirectGuestToLogin extends Base
+{
+    public function onBeforeAction(Event $event)
+    {
+        $isAuthorized = $this->getAction()->getController()->getCurrentUser()?->getId() > 0;
+        if ($isAuthorized)
+        {
+            return;
+        }
+
+        $requestUri = Application::getInstance()
+            ->getContext()
+            ->getRequest()
+            ->getRequestUri()
+        ;
+
+        \LocalRedirect('/login/?backurl=' . urlencode($requestUri));
+    }
+}
+```
+
+Подключите префильтр к действию:
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Attribute\Rule\Prefilters;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[Prefilters([
+        new RedirectGuestToLogin(),
+    ])]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+Добавьте фильтр в `getDefaultPreFilters()`, если перенаправление требуется для всех действий контроллера.
+
+### Фильтр CSRF-защиты
+
+`\Bitrix\Main\Engine\ActionFilter\Csrf`
+
+Проверяет наличие и корректность CSRF-токена и блокирует действие, если проверка не пройдена. Работает в области `Controller::SCOPE_AJAX` и использует `check_bitrix_sessid()`.
+
+Для AJAX-действий, которые меняют данные, сочетайте `Csrf` с `Authentication` и `HttpMethod`, разрешающим только `POST`. Метод `BX.ajax.runAction()` автоматически передает токен в заголовке `X-Bitrix-Csrf-Token`. Пример настройки приведен в статье [«CSRF и SSRF»](../security/csrf-ssrf.md#controller-actions).
+
+Аргументы:
+
+-  `$enabled` — включает проверку токена. По умолчанию — `true`.
+
+-  `$tokenName` — имя параметра запроса с токеном. По умолчанию — `'sessid'`.
+
+-  `$returnNew` — возвращает новый токен при неудаче. По умолчанию — `true`.
+
+Пример использования:
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Attribute\Rule\Prefilters;
+use Bitrix\Main\Engine\ActionFilter\Csrf;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[Prefilters([
+        new Csrf(
+            tokenName: 'sessid',
+            returnNew: false,
+        ),
+    ])]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+Имеет аналог в виде атрибута:
+
+```php
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[\Bitrix\Main\Engine\ActionFilter\Attribute\Rule\Csrf(
+        tokenName: 'sessid',
+        returnNew: false,
+    )]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+### Фильтр закрытия сессии
+
+`\Bitrix\Main\Engine\ActionFilter\CloseSession`
+
+Закрывает сессию перед выполнением действия.  Полезен для повышения производительности, когда изменения в сессии не требуются. Будьте внимательны, так как изменения в сессии после закрытия не сохранятся.
+
+Атрибуты:
+
+-  `$enabled` — включает фильтр. По умолчанию — `true`.
+
+Пример использования:
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Attribute\Rule\Prefilters;
+use Bitrix\Main\Engine\ActionFilter\CloseSession;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[Prefilters([
+        new CloseSession(),
+    ])]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+Имеет аналог в виде атрибута:
+
+```php
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[\Bitrix\Main\Engine\ActionFilter\Attribute\Rule\CloseSession]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+### Фильтр области действия
+
+`\Bitrix\Main\Engine\ActionFilter\Scope`
+
+Блокирует действия для определенного scope. Полезен для ограничения доступа к действиям в зависимости от контекста выполнения, например, только для AJAX-запросов.
+
+Аргументы:
+
+-  `$scopes` — перечисление допустимых scopes.
+
+Пример использования:
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Attribute\Rule\Prefilters;
+use Bitrix\Main\Engine\ActionFilter\Scope;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[Prefilters([
+        new Scope(
+            Scope::AJAX | Scope::REST
+        ),
+    ])]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+Имеет аналог в виде атрибута:
+
+```php
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[\Bitrix\Main\Engine\ActionFilter\Attribute\Rule\Scope(
+        Scope::AJAX | Scope::REST
+    )]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+### Фильтр CORS-настроек
+
+`\Bitrix\Main\Engine\ActionFilter\Cors`
+
+Устанавливает заголовки для управления CORS. Используется для настройки CORS, когда требуется доступ к ресурсам с другого домена.
+
+Аргументы:
+
+-  `$origin` — заголовок `Access-Control-Allow-Origin`. По умолчанию — `null`.
+
+-  `$credentials` — устанавливает заголовок `Access-Control-Allow-Credentials`. По умолчанию — `false`.
+
+Пример использования:
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Attribute\Rule\Postfilters;
+use Bitrix\Main\Engine\ActionFilter\Cors;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[Postfilters([
+        new Cors()
+    ])]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+Имеет аналог в виде атрибута:
+
+```php
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[\Bitrix\Main\Engine\ActionFilter\Attribute\Rule\Cors]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+### Фильтр типа контента
+
+`\Bitrix\Main\Engine\ActionFilter\ContentType`
+
+Разрешает выполнение действия только для допустимых `content-type`. Полезен для обеспечения корректной обработки данных в зависимости от типа контента, например, JSON.
+
+Аргументы:
+
+-  `$allowedTypes` — допустимые content-type.
+
+Пример использования:
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Attribute\Rule\Prefilters;
+use Bitrix\Main\Engine\ActionFilter\ContentType;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[Prefilters([
+        new ContentType([
+            'application/json',
+        ])
+    ])]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+## Как использовать фильтры в контроллерах
+
+Указать фильтры для конкретных действий можно с помощью метода контроллера `configureActions`.
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Authentication;
+use Bitrix\Main\Engine\ActionFilter\Cors;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    public function configureActions()
+    {
+        return [
+            'index' => [
+                'prefilters' => [
+                    new Authentication(),
+                ],
+                'postfilters' => [
+                    new Cors(),
+                ],
+            ],
+        ];
+    }
+
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+Тоже самое можно сделать с помощью атрибутов `Prefilters` и `Postfilters`.
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Attribute\Rule\Postfilters;
+use Bitrix\Main\Engine\ActionFilter\Attribute\Rule\Prefilters;
+use Bitrix\Main\Engine\ActionFilter\Authentication;
+use Bitrix\Main\Engine\ActionFilter\Cors;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    #[Prefilters([
+        new Authentication(),
+    ])]
+    #[Postfilters([
+        new Cors(),
+    ])]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+### Фильтры по умолчанию {#default-filters}
+
+Если для действия не задан собственный набор префильтров, контроллер берет его из метода `getDefaultPreFilters()`. В стандартном AJAX-контроллере этот набор включает:
+
+-  `Authentication` — требует входа пользователя,
+
+-  `HttpMethod` — разрешает `GET` и `POST`,
+
+-  `Csrf` — проверяет CSRF-токен.
+
+Повторно включать эти проверки для AJAX-действий не нужно. Дополнительная настройка нужна, если действие должно разрешать только `POST`, быть доступным гостям или использовать другие параметры фильтров. Фильтр `Authentication` проверяет только вход пользователя. Права на конкретные данные проверяйте отдельно.
+
+Параметр `prefilters` в `configureActions()` и атрибут `Prefilters` задают собственный набор префильтров действия вместо набора по умолчанию. При такой настройке явно укажите необходимые проверки. Чтобы дополнить или сократить существующий набор, используйте [дополняющие и вычитающие фильтры](#filter-modifiers).
+
+Чтобы изменить набор по умолчанию для всего контроллера, переопределите метод `getDefaultPreFilters()`. Метод `getDefaultPostFilters()` задает постфильтры по умолчанию.
+
+В примере ниже все действия контроллера используют префильтр `Authentication` и постфильтр `Cors`.
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Authentication;
+use Bitrix\Main\Engine\ActionFilter\Cors;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    protected function getDefaultPreFilters()
+    {
+        return [
+            new Authentication(),
+        ];
+    }
+
+    protected function getDefaultPostFilters()
+    {
+        return [
+            new Cors(),
+        ];
+    }
+
+    public function indexAction()
+    {
+        // ...
+    }
+
+    public function getAction()
+    {
+        // ...
+    }
+}
+```
+
+Если использовать префильтры по умолчанию не нужно, передайте пустой массив.
+
+```php
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    protected function getDefaultPreFilters()
+    {
+        return [];
+    }
+}
+```
+
+### Дополняющие и вычитающие фильтры {#filter-modifiers}
+
+Чтобы гибко работать с фильтрами, можно включать и отключать различные фильтры с помощью префиксов `+` и `-` в `configureActions()`.
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Authentication;
+use Bitrix\Main\Engine\ActionFilter\CloseSession;
+use Bitrix\Main\Engine\ActionFilter\Csrf;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    protected function getDefaultPreFilters()
+    {
+        return [
+            new Authentication(),
+            new Csrf(),
+        ];
+    }
+
+    public function configureActions()
+    {
+        return [
+            // Итого для действия `index` будут применены фильтры: CloseSession и Csrf
+            'index' => [
+                '+prefilters' => [
+                    new CloseSession()
+                ],
+                '-prefilters' => [
+                    Authentication::class,
+                ],
+            ],
+        ];
+    }
+
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+И аналогично с использованием атрибутов `EnablePrefilters` и `DisablePrefilters`.
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Attribute\Rule\DisablePrefilters;
+use Bitrix\Main\Engine\ActionFilter\Attribute\Rule\EnablePrefilters;
+use Bitrix\Main\Engine\ActionFilter\Authentication;
+use Bitrix\Main\Engine\ActionFilter\CloseSession;
+use Bitrix\Main\Engine\ActionFilter\Csrf;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    protected function getDefaultPreFilters()
+    {
+        return [
+            new Authentication(),
+            new Csrf(),
+        ];
+    }
+
+    #[EnablePrefilters([
+        new CloseSession(),
+    ])]
+    #[DisablePrefilters([
+        Authentication::class,
+    ])]
+    public function indexAction()
+    {
+        // ...
+    }
+}
+```
+
+Аналогичным образом работает механика дополнения и вычитания для постфильтров.
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Attribute\Rule\DisablePostfilters;
+use Bitrix\Main\Engine\ActionFilter\Attribute\Rule\EnablePostfilters;
+use Bitrix\Main\Engine\ActionFilter\Cors;
+
+final class Entity extends \Bitrix\Main\Engine\Controller
+{
+    protected function getDefaultPostFilters()
+    {
+        return [
+            new Cors(),
+        ];
+    }
+
+    public function configureActions()
+    {
+        return [
+            // Итого для действия `index` будут применен только фильтр AnotherPostFilter
+            'index' => [
+                '+postfilters' => [
+                    new AnotherPostFilter(),
+                ],
+                '-postfilters' => [
+                    Cors::class,
+                ],
+            ],
+        ];
+    }
+
+    public function indexAction()
+    {
+        // ...
+    }
+
+    #[EnablePostfilters([
+        new AnotherPostFilter(),
+    ])]
+    #[DisablePostfilters([
+        Cors::class,
+    ])]
+    public function getAction()
+    {
+        // ...
+    }
+}
+```
+
+{% note warning "" %}
+
+В случае дополнения фильтров нужно отправлять объект фильтра, а в случае вычитания — имя класса.
+
+{% endnote %}
+
+### Подменить ответ через фильтр
+
+Фильтры добавляют свои ошибки в контроллер. Пример работы с ошибками можно посмотреть в стандартном фильтре `Bitrix\Main\Engine\ActionFilter\HttpMethod::onBeforeAction`.
+
+Фильтр может подменить результат через метод `onAfterAction`.
+
+```php
+use Bitrix\Main\Engine\ActionFilter\Base;
+use Bitrix\Main\Event;
+use Bitrix\Main\EventResult;
+use Bitrix\Main\HttpResponse;
+
+class CustomFilter extends Base
+{
+    public function onBeforeAction(Event $event)
+    {
+        // Решаем подменить ответ, возвращаем ошибку в обработчике ДО
+
+        return new EventResult(
+            EventResult::ERROR,
+            handler: $this,
+        );
+    }
+
+    public function onAfterAction(Event $event)
+    {
+        // В обработчике ПОСЛЕ подменяем результат
+        // Если вернуть объект HttpResponse, то он отдается как есть
+        // Иначе результат обернут в стандартный JSON
+
+        $customResponse = new HttpResponse();
+
+        $event->setParameter('result', $customResponse);
+    }
+}
+```
+
+Обработчики событий вызываются в методе `Bitrix\Main\Engine\Controller::run`.

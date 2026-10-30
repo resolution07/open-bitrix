@@ -9,9 +9,6 @@ services:
       - ./docker/nginx/log:/var/log/nginx
       - ./docker/nginx/config:/etc/nginx/conf.d
       - ./docker/nginx/ssl:/etc/nginx/ssl
-    depends_on:
-      php-fpm:
-        condition: service_healthy
     networks:
       - bitrix
 
@@ -24,11 +21,6 @@ services:
       - ./docker/php-fpm/www.conf:/usr/local/etc/php-fpm.d/www.conf
       - ./docker/php-fpm/php.ini:/usr/local/etc/php/php.ini
       - ./docker/php-fpm/conf.d:/usr/local/etc/php/conf.d
-    healthcheck:
-      test: [ "CMD-SHELL", "php-fpm -t || exit 1" ]
-      interval: 10s
-      timeout: 3s
-      retries: 3
     networks:
       - bitrix
 

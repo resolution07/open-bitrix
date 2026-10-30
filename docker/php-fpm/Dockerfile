@@ -1,4 +1,4 @@
-FROM php:8.4-fpm-alpine
+FROM php:8.5-fpm-alpine
 
 RUN apk add --no-cache \
     icu-data-full \
@@ -41,7 +41,6 @@ RUN apk add --no-cache --virtual .build-deps \
         mysqli \
         pdo_mysql \
         intl \
-        opcache \
         exif \
         zip && \
     pecl install redis xdebug && \

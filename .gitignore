@@ -1,7 +1,5 @@
-app/*
-!app/index.php
 docker/mysql/data
-
+app/bitrix
 .idea
 .env
 *.log
